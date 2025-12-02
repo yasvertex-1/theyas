@@ -24,8 +24,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
 # --- Configuration Constants ---
-PINECONE_INDEX_NAME = "legal-support-ai"
-PINECONE_NAMESPACE = "legal-support-ai-docs"
+PINECONE_INDEX_NAME = "legal-ai-chatbot"
+PINECONE_NAMESPACE = "legal-ai-docs"
 SUPPORTED_FILE_TYPES = [".pdf", ".docx"]
 CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 200
@@ -36,11 +36,11 @@ if not GOOGLE_API_KEY or not PINECONE_API_KEY:
     raise RuntimeError("Missing required API keys in environment variables")
 
 embeddings_model = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001",
-    google_api_key=GOOGLE_API_KEY
+    model="models/embedding-001", google_api_key=GOOGLE_API_KEY
 )
 
-embeddings_model1 = SentenceTransformer('BAAI/bge-m3')
+embeddings_model1 = SentenceTransformer("BAAI/bge-m3")
+
 
 # --- Response Models ---
 class IngestionResponse(BaseModel):
@@ -63,15 +63,12 @@ class ErrorResponse(BaseModel):
 app = FastAPI(
     title="Enhanced Document Ingestion API",
     description="API for ingesting documents with RAG-optimized metadata",
-    version="2.1.0"
+    version="2.1.0",
 )
 
 
 def generate_document_metadata(
-    filename: str,
-    content: bytes,
-    content_type: str,
-    document_id: str
+    filename: str, content: bytes, content_type: str, document_id: str
 ) -> dict:
     """Generate comprehensive metadata for RAG retrieval."""
     return {
@@ -86,9 +83,7 @@ def generate_document_metadata(
 
 
 def sync_process_file(
-    filename: str,
-    content: bytes,
-    content_type: str
+    filename: str, content: bytes, content_type: str
 ) -> IngestionResponse:
     """
     Synchronous helper to process a single file:
@@ -107,7 +102,7 @@ def sync_process_file(
     if file_extension not in SUPPORTED_FILE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported file type '{file_extension}'. Supported types: {SUPPORTED_FILE_TYPES}"
+            detail=f"Unsupported file type '{file_extension}'. Supported types: {SUPPORTED_FILE_TYPES}",
         )
 
     # Generate a deterministic document ID based on content
@@ -127,7 +122,7 @@ def sync_process_file(
         if not extracted_text.strip():
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="No text content extracted from document"
+                detail="No text content extracted from document",
             )
     finally:
         # Always clean up the temp file
@@ -143,52 +138,58 @@ def sync_process_file(
     )
 
     # Create a LangchainDocument and split it
-    parent_doc = LangchainDocument(
-        page_content=extracted_text,
-        metadata=metadata
-    )
+    parent_doc = LangchainDocument(page_content=extracted_text, metadata=metadata)
     split_docs = text_splitter.split_documents([parent_doc])
 
     # Add chunk-level metadata to each split document
     for i, doc in enumerate(split_docs):
-        doc.metadata.update({
-            "chunk_id": f"{document_id}_{i}",
-            "chunk_index": i,
-            "total_chunks": len(split_docs),
-            "content_hash": hashlib.sha256(doc.page_content.encode()).hexdigest()
-        })
+        doc.metadata.update(
+            {
+                "chunk_id": f"{document_id}_{i}",
+                "chunk_index": i,
+                "total_chunks": len(split_docs),
+                "content_hash": hashlib.sha256(doc.page_content.encode()).hexdigest(),
+            }
+        )
 
     # Initialize Pinecone client
     pc = Pinecone(api_key=PINECONE_API_KEY)
-    
+
     # Get or create the index
     if PINECONE_INDEX_NAME not in pc.list_indexes().names():
         pc.create_index(
             name=PINECONE_INDEX_NAME,
-            dimension=1024,  # Dimension of Google's embedding-001 model
+            dimension=1024,  # Dimension embedding model
             metric="cosine",
-            spec=ServerlessSpec(cloud='aws', region="us-east-1")
+            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
         )
-    
+
     index = pc.Index(PINECONE_INDEX_NAME)
-    
+
     # Generate embeddings for each chunk
     embeddings = embeddings_model1.encode([doc.page_content for doc in split_docs])
-    
-    # Prepare vectors for upsert
+
+    # Prepare vectors for upsert with text content and comprehensive metadata
     vectors = []
     for doc, embedding in zip(split_docs, embeddings):
+        # Create a copy of metadata and add text content
+        metadata_with_text = doc.metadata.copy()
+        metadata_with_text["text"] = (
+            doc.page_content
+        )  # CRITICAL: Include actual text content
+        metadata_with_text["text_length"] = len(doc.page_content)
+
         vector = {
-            'id': doc.metadata['chunk_id'],
-            'values': embedding,
-            'metadata': doc.metadata
+            "id": doc.metadata["chunk_id"],
+            "values": embedding.tolist(),  # Convert numpy array to list
+            "metadata": metadata_with_text,
         }
         vectors.append(vector)
-    
+
     # Upsert vectors in batches
     batch_size = 100
     for i in range(0, len(vectors), batch_size):
-        batch = vectors[i:i + batch_size]
+        batch = vectors[i : i + batch_size]
         index.upsert(vectors=batch, namespace=PINECONE_NAMESPACE)
 
     # Compute processing metrics
@@ -201,11 +202,13 @@ def sync_process_file(
         file_size=len(content),
         chunks_ingested=len(split_docs),
         processing_time=processing_time,
-        vector_count=len(split_docs)
+        vector_count=len(split_docs),
     )
 
 
-async def process_file(file: UploadFile, sem: asyncio.Semaphore) -> Union[IngestionResponse, ErrorResponse]:
+async def process_file(
+    file: UploadFile, sem: asyncio.Semaphore
+) -> Union[IngestionResponse, ErrorResponse]:
     """
     Async wrapper for processing a single UploadFile with a concurrency limit:
       - Acquires semaphore before proceeding
@@ -220,7 +223,7 @@ async def process_file(file: UploadFile, sem: asyncio.Semaphore) -> Union[Ingest
             if not content:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Empty file received"
+                    detail="Empty file received",
                 )
 
             # Run the synchronous ingestion logic in a threadpool
@@ -228,11 +231,8 @@ async def process_file(file: UploadFile, sem: asyncio.Semaphore) -> Union[Ingest
             result = await loop.run_in_executor(
                 None,
                 functools.partial(
-                    sync_process_file,
-                    file.filename,
-                    content,
-                    file.content_type
-                )
+                    sync_process_file, file.filename, content, file.content_type
+                ),
             )
             return result
 
@@ -240,23 +240,41 @@ async def process_file(file: UploadFile, sem: asyncio.Semaphore) -> Union[Ingest
             return ErrorResponse(
                 error="Processing failure",
                 detail=str(he.detail),
-                document=file.filename
+                document=file.filename,
             )
 
         except Exception as e:
             return ErrorResponse(
-                error="Processing failure",
-                detail=str(e),
-                document=file.filename
+                error="Processing failure", detail=str(e), document=file.filename
             )
 
 
 @app.post(
     "/ingest-documents/",
     response_model=List[Union[IngestionResponse, ErrorResponse]],
-    status_code=status.HTTP_207_MULTI_STATUS
+    status_code=status.HTTP_207_MULTI_STATUS,
+    summary="Ingest Multiple Legal Documents",
+    description="""
+    Upload and ingest multiple legal documents (PDF/DOCX) into the vector database.
+    
+    **Features:**
+    - Supports batch upload of multiple files simultaneously
+    - Extracts text content from PDF and DOCX files
+    - Chunks documents with optimal overlap for RAG retrieval
+    - Generates embeddings using BAAI/bge-m3 model
+    - Stores text content + comprehensive metadata in Pinecone
+    
+    **Supported File Types:** PDF (.pdf), Word Documents (.docx)
+    
+    **In Swagger UI:** Click 'Add string item' or use the file browser to select multiple local files at once.
+    """,
 )
-async def ingest_documents_endpoint(files: List[UploadFile] = File(...)):
+async def ingest_documents_endpoint(
+    files: List[UploadFile] = File(
+        ...,
+        description="Select one or multiple document files to ingest. Use Ctrl/Cmd+Click to select multiple files.",
+    )
+):
     """
     Endpoint to ingest multiple documents in parallel, but with a concurrency limit.
     Returns a list of either IngestionResponse (success) or ErrorResponse (failure) for each file.
@@ -275,11 +293,16 @@ def health_check():
         "status": "healthy",
         "index": PINECONE_INDEX_NAME,
         "namespace": PINECONE_NAMESPACE,
-        "embedding_model": "models/embedding-001",
-        "max_concurrent_ingestions": MAX_CONCURRENT_PROCESSES
+        "embedding_model": "BAAI/bge-m3",
+        "embedding_dimension": 1024,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "max_concurrent_ingestions": MAX_CONCURRENT_PROCESSES,
+        "supported_file_types": SUPPORTED_FILE_TYPES,
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app)

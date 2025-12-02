@@ -91,7 +91,7 @@ vector_store = PineconeVectorStore(
 retriever = vector_store.as_retriever()
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-2.5-flash",
     temperature=0.0,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
